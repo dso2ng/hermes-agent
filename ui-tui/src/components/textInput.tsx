@@ -27,6 +27,74 @@ const PRINTABLE = /^[ -~\u00a0-\uffff]+$/
 const BRACKET_PASTE = new RegExp(`${ESC}?\\[20[01]~`, 'g')
 const MULTI_CLICK_MS = 500
 
+const RAW_LF_NEWLINE_TERMINALS = new Set(['WezTerm', 'WarpTerminal', 'iTerm.app', 'ghostty', 'vscode'])
+
+type ModifiedEnterKey = Partial<Pick<Key, 'return' | 'shift' | 'ctrl' | 'meta' | 'super'>>
+
+type ModifiedEnterEnv = Partial<
+  Record<
+    | 'SSH_CONNECTION'
+    | 'SSH_CLIENT'
+    | 'SSH_TTY'
+    | 'WT_SESSION'
+    | 'WSL_DISTRO_NAME'
+    | 'WSL_INTEROP'
+    | 'TERM_PROGRAM'
+    | 'KITTY_WINDOW_ID'
+    | 'TERM',
+    string | undefined
+  >
+>
+
+type ModifiedEnterIntentInput = {
+  eventRaw: string | undefined
+  key: ModifiedEnterKey
+  env?: ModifiedEnterEnv
+  platform?: NodeJS.Platform
+}
+
+export function shouldPreserveRawLfNewlineIntent(
+  env: ModifiedEnterIntentInput['env'] = process.env,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (platform === 'win32') {
+    return true
+  }
+
+  if (env?.SSH_CONNECTION || env?.SSH_CLIENT || env?.SSH_TTY || env?.WT_SESSION || env?.WSL_DISTRO_NAME || env?.WSL_INTEROP) {
+    return true
+  }
+
+  const termProgram = env?.TERM_PROGRAM
+
+  if (termProgram && RAW_LF_NEWLINE_TERMINALS.has(termProgram)) {
+    return true
+  }
+
+  if (env?.KITTY_WINDOW_ID) {
+    return true
+  }
+
+  return false
+}
+
+export function isModifiedEnterNewlineIntent({
+  eventRaw,
+  key,
+  env = process.env,
+  platform = process.platform,
+}: ModifiedEnterIntentInput): boolean {
+  if (!key.return) {
+    return false
+  }
+
+  if (key.shift || key.ctrl || (platform === 'darwin' ? key.meta || key.super === true : key.meta)) {
+    return true
+  }
+
+  return eventRaw === '\n' && shouldPreserveRawLfNewlineIntent(env, platform)
+}
+
 const invert = (s: string) => INV + s + INV_OFF
 const dim = (s: string) => DIM + s + DIM_OFF
 
@@ -761,12 +829,12 @@ export function TextInput({
       }
 
       if (k.return) {
-        // Some terminal stacks (notably Warp/tmux on macOS) distinguish
-        // plain Enter from Shift+Enter/Ctrl+J by raw byte only:
-        //   Enter -> CR (\r, 13), Shift+Enter/Ctrl+J -> LF (\n, 10)
-        // Ink marks both as `key.return`, so preserve the raw LF distinction
-        // before falling through to the normal CR-submit path.
-        if (eventRaw === '\n' || k.shift || k.ctrl || (isMac ? isActionMod(k) : k.meta)) {
+        // Some terminal stacks distinguish plain Enter from modified Enter
+        // by raw byte only: Enter -> CR (\r, 13), Ctrl+J / configured
+        // Shift+Enter -> LF (\n, 10). Treat that LF as newline only in
+        // environments where plain Enter is expected to remain distinct, so
+        // local thin PTYs that send Enter itself as LF can still submit.
+        if (isModifiedEnterNewlineIntent({ eventRaw, key: k })) {
           flushParentChange()
           commit(ins(vRef.current, curRef.current, '\n'), curRef.current + 1)
         } else {
