@@ -112,3 +112,27 @@ test('wait times out when no callback arrives', async () => {
   assert.equal(result.code, null)
   assert.match(String(result.error), /timeout/)
 })
+
+test.each([null, 'https://idp.example/tenant%2Fone/'])(
+  'preserves optional issuer %s through the native HTTP listener and IPC waiter',
+  async issuer => {
+    const { id, redirectUri } = (await invoke('hermes:mcp-oauth:listen')) as { id: string; redirectUri: string }
+
+    try {
+      const url = new URL(redirectUri)
+      url.searchParams.set('code', 'test-code')
+      url.searchParams.set('state', 'expected')
+
+      if (issuer !== null) {
+        url.searchParams.set('iss', issuer)
+      }
+      const waiting = invoke('hermes:mcp-oauth:wait', id, 5000)
+      const response = await fetch(url)
+      await response.text()
+      assert.equal(response.ok, true)
+      assert.deepEqual(await waiting, { code: 'test-code', state: 'expected', error: null, iss: issuer })
+    } finally {
+      await invoke('hermes:mcp-oauth:cancel', id)
+    }
+  }
+)
